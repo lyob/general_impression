@@ -130,11 +130,15 @@ class Layer():
         self.rec_switch = 0
         self.parent = None
         self.child = None
-        
+        self.state = "up"
+        self.a = 0.001
+        self.d = self.a
+
     def link(self, parent = None, child = None):
         self.parent = parent
         self.child = child
-        
+
+
     def set_phase(self, phase):
         """sets the phase (wake or sleep) for the network"""
         self.phase = phase
@@ -145,7 +149,7 @@ class Layer():
         elif phase == 'deep_sleep':
             self.delta = 0.0
         return
-    
+
     def toggle_phase(self):
         """toggles the phase that the network is in"""
         if self.phase == 'wake':
@@ -154,7 +158,22 @@ class Layer():
             self.set_phase('wake')
             self.rec_switch = 1 #indication that a switch to the recognition state has occurred
         return
-    
+
+    def set_state(self, state):
+        self.state = state
+        if self.state == 'up':
+            self.d = self.a
+        elif self.state == 'down':
+            self.d = -self.a
+        return
+
+    def toggle_state(self):
+        if self.state == 'up':
+            self.set_state('down')
+        elif self.state == "down":
+            self.set_state('up')
+        return
+
     def continue_phase(self):
         """remain in the current phase. Remove markers indicating phase switches"""
         self.rec_switch = 0
@@ -215,6 +234,7 @@ class InputLayer(Layer):
         #produce observations from the latent variables and the noise
         self.h_mean_gen = self.W_out @ self.parent.h_gen
         self.h_gen = self.h_mean_gen + self.noise_gen
+        self.mu3_1 = self.h_mean_gen
         
     def forward_recognition(self, h_child):
         self.h_child = h_child
@@ -292,19 +312,27 @@ class FeedforwardLayer(Layer):
         else:
             self.biased = False
     
-    def forward_generative(self):
-        if not(self.parent is None):
-            self.h_mean_gen = self.nl.f(self.W_out @ self.parent.h_gen + self.bias_gen)
-        else:
-            self.h_mean_gen = self.transition_mat @ self.h
+    def forward_generative(self, h_rel):
+
+        """ for cases where there is a parent layer: """
+        # if not(self.parent is None):
+        #     self.h_mean_gen = self.nl.f(self.W_out @ self.parent.h_gen + self.bias_gen)
+        # else:
+        #     self.h_mean_gen = self.transition_mat @ self.h
+
+        """ no parent layer """
+        if h_rel:
+            self.h = h_rel
+        self.h_mean_gen = self.transition_mat @ self.h
         self.noise_gen = np.random.normal(scale = self.sigma_gen, size = (self.N,))
         self.h_gen = self.h_mean_gen + self.noise_gen
-        
+
     def forward_recognition(self):
         self.h_pre_rec = self.W_in @ self.child.h_rec + self.bias
         self.h_mean_rec = self.nl.f(self.h_pre_rec)
         self.noise_rec = np.random.normal(scale = self.sigma_rec, size = (self.N,))
         self.h_rec = self.h_mean_rec + self.noise_rec
+        self.mu3_2 = self.h_mean_rec
         
     def forward(self):
         self.h_prev = self.h
@@ -384,6 +412,8 @@ class LayeredHM():
         self.n_latent = np.sum(N_vec) #total # of neurons
         self.sigma_gen_vec = sigma_gen_vec
         self.sigma_rec_vec = sigma_rec_vec
+
+        self.Lambda = 0.5
         
         #construct the individual layers
         self.l0 = InputLayer(N_vec[0], N_vec[1], nonlinearity, sigma_gen_vec[0], sigma_rec_vec[0])
@@ -397,100 +427,113 @@ class LayeredHM():
         self.set_phase('wake')
         
     def set_phase(self,phase):
-        for layer in self.layer_list:
-            layer.set_phase(phase)
+        # update this class
         self.phase = phase
-    
+
+        if (self.phase == 'wake'):
+            self.state = 'up'
+        elif (self.phase == 'sleep'):
+            self.state = 'down'
+
+        # update the layers
+        for layer in self.layer_list:
+            layer.set_phase(self.phase)
+            layer.set_state(self.state)
+
     def toggle_phase(self):
+        # update the layers
         for layer in self.layer_list:
             layer.toggle_phase()
+            layer.toggle_state()
+
+        # update this class
         if self.phase == 'wake':
             self.phase = 'sleep'
+            self.state = 'down'
         elif self.phase == 'sleep':
             self.phase = 'wake'
+            self.state = 'up'
             self.rec_switch = 1 #variable indicates if a phase switch has just occurred
-    
+
     def continue_phase(self):
         for layer in self.layer_list:
             layer.continue_phase()
         self.rec_switch = 0
+
     def reset(self):
         for layer in self.layer_list:
             layer.reset()
             
     def forward(self, x):
-        #pass forward through the network for approximate inference
+        """ this has an issue of referring to variables that don't exist yet (l1.h_mean_rec) before they're initialised
+            this makes me think that it should be handled in the l1 (feedforwardlayer) methods as opposed to in the HMLayer
+            class.
+        """
+
+        # Starts with SIL
+        if not self.prev_mu3:
+            # t=1
+            if not self.prev_mu1:
+                # create mu2
+                self.l0.forward_recognition(x)
+                self.l1.forward_recognition()
+
+            # t=2
+            else:
+                # create mu1
+                self.l1.forward_generative()
+                self.l0.forward_generative()
+
+                # create mu2
+                self.l0.forward_recognition(x)
+                self.l1.forward_recognition()
+
+                # save current values of mu1, mu2
+                self.prev_mu1 = self.l0.h_mean_gen
+                self.prev_mu2 = self.l1.h_mean_rec
+
+        # t=3
+        else:
+            # create mu3
+            self.mu3 = (self.Lambda + self.d) * self.prev_mu1 + (1 - self.Lambda - self.d) * self.prev_mu2
+            h_rel = self.mu3 + np.random.normal(scale=self.sigma_rec, size=(self.N,))
+
+            # create mu1
+            self.l1.forward_generative(h_rel)
+            self.l0.forward_generative()
+
+            # create mu2
+            self.l0.forward_recognition(x)
+            self.l1.forward_recognition()
+
+            # save current values of mu1, mu2, mu3
+            self.prev_mu1 = self.l0.h_mean_gen
+            self.prev_mu2 = self.l1.h_mean_rec
+            self.prev_mu3 = self.mu3
+
+
+        # pass forward through the network for approximate inference (create mu2)
         self.l0.forward_recognition(x)
         self.l1.forward_recognition()
-        
-        #pass backward through the network for stimulus generation
-        self.l1.forward_generative()
+
+        # pass backward through the network for stimulus generation (create mu1)
+        if self.prev_mu3.any():
+            h_rel = self.prev_mu3 + np.random.normal(scale=self.sigma_rec, size=(self.N,))
+            self.l1.forward_generative(h_rel)
+        else:
+            self.l1.forward_generative()
         self.l0.forward_generative()
-        
-        #based on the network phase, choose to set activities according to inference or generation
+
+        # create mu3
+        self.d = self.l0.d  # = self.l1.d
+        self.mu3 = (self.Lambda + self.d) * self.prev_mu1 + (1 - self.Lambda - self.d) * self.prev_mu2
+
+        # based on the network phase, choose to set activities according to inference or generation (create losses)
         self.l0.forward()
         self.l1.forward()
         
         self.loss_total = np.sum([layer.layer_loss for layer in self.layer_list])
-        
-# class TwoLayeredHM():
-#     def __init__(self, N_vec, sigma_gen_vec, sigma_rec_vec):
-#         self.N_vec = N_vec
-#         self.n_latent = np.sum(N_vec) #total # of neurons
-#         self.sigma_gen_vec = sigma_gen_vec
-#         self.sigma_rec_vec = sigma_rec_vec
-#
-#         #construct the individual layers
-#         self.l0 = InputLayer(N_vec[0], N_vec[1], nonlinearity, sigma_gen_vec[0], sigma_rec_vec[0])
-#         self.l1 = FeedforwardLayer(N_vec[1], N_vec[2], N_vec[0], nonlinearity, sigma_gen_vec[1], sigma_rec_vec[1], bias = True, top_layer = False)
-#         self.l2 = FeedforwardLayer(N_vec[2], None, N_vec[1], nonlinearity, sigma_gen_vec[2], sigma_rec_vec[2], bias = False, top_layer = True)
-#         #link together the individual layers
-#         self.l0.link(parent = self.l1, child = None)
-#         self.l1.link(parent = self.l2, child = self.l0)
-#         self.l2.link(parent = None, child = self.l1)
-#         self.layer_list = (self.l0, self.l1, self.l2)
-#         self.set_phase('wake')
-#
-#     def set_phase(self,phase):
-#         for layer in self.layer_list:
-#             layer.set_phase(phase)
-#         self.phase = phase
-#
-#     def toggle_phase(self):
-#         for layer in self.layer_list:
-#             layer.toggle_phase()
-#         if self.phase == 'wake':
-#             self.phase = 'sleep'
-#         elif self.phase == 'sleep':
-#             self.phase = 'wake'
-#             self.rec_switch = 1 #variable indicates if a phase switch has just occurred
-#
-#     def continue_phase(self):
-#         for layer in self.layer_list:
-#             layer.continue_phase()
-#         self.rec_switch = 0
-#
-#     def reset(self):
-#         for layer in self.layer_list:
-#             layer.reset()
-#
-#     def forward(self, x):
-#         #pass forward through the network for approximate inference
-#         self.l0.forward_recognition(x)
-#         self.l1.forward_recognition()
-#         self.l2.forward_recognition()
-#         #pass backward through the network for stimulus generation
-#         self.l2.forward_generative()
-#         self.l1.forward_generative()
-#         self.l0.forward_generative()
-#
-#         #based on the network phase, choose to set activities according to inference or generation
-#         self.l0.forward()
-#         self.l1.forward()
-#         self.l2.forward()
-#
-#         self.loss_total = np.sum([layer.layer_loss for layer in self.layer_list])
-#
+
 class LayeredLearningAlgorithm():
     
     def __init__(self, network, learning_rate):
@@ -554,18 +597,18 @@ class LayeredImpression(LayeredLearningAlgorithm):
         self.switch_period = switch_period
         self.switch_counter = 0
     def update_learning_vars(self, record_stats = False):
-        #the statistics functions only care about W_in, so we only run in the sleep phase if stats are being recorded
+        # the statistics functions only care about W_in, so we only run in the sleep phase if stats are being recorded
             
-        #update the feedforward recognition weights
-        if self.nn.phase == 'sleep':# and not(self.switch_counter == 0):
+        # update the feedforward recognition weights
+        if self.nn.phase == 'sleep':  # and not(self.switch_counter == 0):
             for ii in range(0, len(self.nn.layer_list)):
                 self.update_list_rec[ii] = self.nn.layer_list[ii].grad_rec()
         else:
             for ii in range(0, len(self.nn.layer_list)):
                 self.update_list_rec[ii] = [0]*len(self.nn.layer_list[ii].params_list_rec)
                 
-        #update the top-down generative weights
-        if self.nn.phase == 'wake':# and not(self.switch_counter == 0):
+        # update the top-down generative weights
+        if self.nn.phase == 'wake':  # and not(self.switch_counter == 0):
             for ii in range(0, len(self.nn.layer_list)):
                 self.update_list_gen[ii] = self.nn.layer_list[ii].grad_gen()
         else:
@@ -578,113 +621,11 @@ class LayeredImpression(LayeredLearningAlgorithm):
             self.switch_counter = self.switch_counter + 1;
             if self.switch_counter > self.switch_period:
                 self.nn.toggle_phase()
+                # self.nn.toggle_delta()
                 self.switch_counter = 0
             else:
                 self.nn.continue_phase()
                     
-                    
-# class LayeredREINFORCE(LayeredLearningAlgorithm):
-#     def __init__(self, network, learning_rate, decay = 0.9, loss_decay = 0.99):
-#         super().__init__(network, learning_rate)
-#         self.e_trace = 0
-#         self.e_trace_update = 0
-#         self.e_trace_rec_list = []
-#         self.e_trace_rec_update_list = []
-#         self.e_trace_rec_update_prev = []
-#         for ii in range(0, len(self.nn.layer_list)):
-#             self.e_trace_rec_list.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_rec_update_list.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_rec_update_prev.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#         self.loss_avg = 0
-#         self.decay = decay
-#         self.loss_decay = loss_decay
-#
-#     def update_learning_vars(self, record_stats = False):
-#         #self.loss_avg = (self.loss_decay) * self.loss_avg + (1-self.loss_decay) * self.nn.loss_total
-#         self.loss_avg = 0#self.loss_decay * self.loss_avg + (1-self.loss_decay)*self.nn.loss_total
-#         for ii in range(0, len(self.nn.layer_list)):
-#             self.e_trace_rec_update_prev[ii] = self.e_trace_rec_update_list[ii]
-#             self.e_trace_rec_update_list[ii] = self.nn.layer_list[ii].e_trace_reinforce()
-#             for jj in range(0, len(self.nn.layer_list[ii].params_list_rec)):
-#                 self.e_trace_rec_list[ii][jj] = self.e_trace_rec_update_list[ii][jj] + self.e_trace_rec_update_prev[ii][jj]
-#                 self.update_list_rec[ii][jj] = (self.nn.loss_total- self.loss_avg) * self.e_trace_rec_list[ii][jj]
-#
-#
-#         #all of the algorithms have the same update for the generative weights
-#         for ii in range(0, len(self.nn.layer_list)):
-#                 self.update_list_gen[ii] = self.nn.layer_list[ii].grad_gen()
-#
-# class LayeredAlternatingREINFORCE(LayeredLearningAlgorithm):
-#     """Algorithm for performing REINFORCE while the network is in an alternating mode, rather than when delta = 1"""
-#     def __init__(self, network, learning_rate, switch_period, decay = 1, loss_decay = 0.99):
-#         super().__init__(network, learning_rate)
-#         self.e_trace = 0
-#         self.e_trace_update = 0
-#         self.e_trace_rec_list = []
-#         self.e_trace_gen_list = []
-#         self.e_trace_rec_update_list = []
-#         self.e_trace_rec_update_prev = []
-#         self.e_trace_gen_update_list = []
-#         self.e_trace_gen_update_prev = []
-#         for ii in range(0, len(self.nn.layer_list)):
-#             self.e_trace_rec_list.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_gen_list.append([0]*len(self.nn.layer_list[ii].params_list_gen))
-#             self.e_trace_rec_update_list.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_rec_update_prev.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_gen_update_list.append([0]*len(self.nn.layer_list[ii].params_list_gen))
-#             self.e_trace_gen_update_prev.append([0]*len(self.nn.layer_list[ii].params_list_gen))
-#         self.loss_avg = 0
-#         self.decay = decay
-#         self.loss_decay = loss_decay
-#
-#         self.switch_period = switch_period
-#         self.switch_counter = 0
-#
-#     def reset_learning(self, loss_reset = False):
-#         for ii in range(0, len(self.nn.layer_list)):
-#             self.e_trace_rec_list.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_gen_list.append([0]*len(self.nn.layer_list[ii].params_list_gen))
-#             self.e_trace_rec_update_list.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_rec_update_prev.append([0]*len(self.nn.layer_list[ii].params_list_rec))
-#             self.e_trace_gen_update_list.append([0]*len(self.nn.layer_list[ii].params_list_gen))
-#             self.e_trace_gen_update_prev.append([0]*len(self.nn.layer_list[ii].params_list_gen))
-#
-#         if loss_reset:
-#             self.loss_avg = 0
-#
-#     def update_learning_vars(self, record_stats = False):
-#         #self.loss_avg = (self.loss_decay) * self.loss_avg + (1-self.loss_decay) * self.nn.loss_total
-#         self.loss_avg = self.loss_decay * self.loss_avg + (1-self.loss_decay)*self.nn.loss_total
-#
-#         #First, compute the updates given by impression learning
-#         for ii in range(0, len(self.nn.layer_list)):
-#             self.update_list_gen[ii] = [(self.nn.layer_list[ii].delta)*grad for grad in self.nn.layer_list[ii].grad_gen()] #this is supposed to be 0 if delta = 0
-#             self.update_list_rec[ii] = [(1-self.nn.layer_list[ii].delta)*grad for grad in self.nn.layer_list[ii].grad_rec()] #this is supposed to be 0 if delta = 1
-#
-#         for ii in range(0, len(self.nn.layer_list)):
-#             self.e_trace_rec_update_prev[ii] = self.e_trace_rec_update_list[ii]
-#             self.e_trace_gen_update_prev[ii] = self.e_trace_gen_update_list[ii]
-#
-#             self.e_trace_rec_update_list[ii] = self.nn.layer_list[ii].grad_rec()
-#             self.e_trace_gen_update_list[ii] = self.nn.layer_list[ii].grad_gen()
-#
-#             #step 2, add on the update given by REINFORCE
-#             for jj in range(0, len(self.nn.layer_list[ii].params_list_rec)):
-#                 self.e_trace_rec_list[ii][jj] = (self.nn.layer_list[ii].delta)* self.e_trace_rec_update_list[ii][jj] + (self.decay)*self.e_trace_rec_list[ii][jj]#self.e_trace_rec_update_prev[ii][jj]
-#                 self.update_list_rec[ii][jj] += (self.nn.loss_total- self.loss_avg) * self.e_trace_rec_list[ii][jj]
-#
-#             for jj in range(0, len(self.nn.layer_list[ii].params_list_gen)):
-#                 self.e_trace_gen_list[ii][jj] = (1 - self.nn.layer_list[ii].delta)*self.e_trace_gen_update_list[ii][jj] + (self.decay)*self.e_trace_gen_list[ii][jj]#self.e_trace_gen_update_prev[ii][jj]
-#                 self.update_list_gen[ii][jj] += (self.nn.loss_total - self.loss_avg) * self.e_trace_gen_list[ii][jj]
-#
-#         if self.switch_period > 0:
-#             self.switch_counter = self.switch_counter + 1;
-#             if self.switch_counter > self.switch_period:
-#                 self.nn.toggle_phase()
-#                 self.switch_counter = 0
-#             else:
-#                 self.nn.continue_phase()
-#
 #Define simulation
 class Simulation():
     def __init__(self, data, learn_alg, nn, train = True, compare_algs = [], epoch_num = 1, learning_stats = False, nn_record = False, phase_switch = False, starting_phase = 'wake'):
@@ -702,9 +643,9 @@ class Simulation():
         self.phase_switch = phase_switch
     def run(self):
         T = self.data.shape[1] #total time
-        if isinstance(self.nn, TwoLayeredHM):
-            latent = np.zeros((self.nn.l1.N + self.nn.l2.N, T))
-        elif isinstance(self.nn, LayeredHM):# or isinstance(self.nn, TwoLayeredHM):
+        # if isinstance(self.nn, TwoLayeredHM):
+        #     latent = np.zeros((self.nn.l1.N + self.nn.l2.N, T))
+        if isinstance(self.nn, LayeredHM):# or isinstance(self.nn, TwoLayeredHM):
             latent = np.zeros((self.nn.l1.N, T))
 
         loss = np.zeros((1,T))
@@ -799,9 +740,7 @@ if __name__ == '__main__':
     
     if exp_params.mode in ('standard', 'MNIST', 'time_constant', 'switch_period', 'dimensionality', 'lr_optim', 'SNR', 'sinusoid'):
         network = LayeredHM([n_in, n_neurons], [sigma_obs_gen, sigma_latent_gen], [exp_params.sigma_in, sigma_latent])
-    # elif exp_params.mode == ('Vocal_Digits'):
-    #     network = TwoLayeredHM([n_in, n_neurons, 40], [sigma_obs_gen, sigma_obs_gen, sigma_latent_gen], [exp_params.sigma_in, sigma_latent, sigma_latent])
-    #build the learning algorithm
+
     learning_rate = exp_params.learning_rate
     switch_period = exp_params.switch_period
     learn_alg = set_learn_alg(network, learning_rate, switch_period)
@@ -845,62 +784,7 @@ if __name__ == '__main__':
         np.random.seed(1111)
         wake_sleep_sequence = Simulation(data_test, learn_alg, network, train = False, phase_switch = True)
         _,_ = wake_sleep_sequence.run()
-        
-        
-    # elif exp_params.mode == 'SNR':
-    #     #run the training simulation
-    #     sim = Simulation(data_train, learn_alg, network, train = True, learning_stats = False, nn_record = True)
-    #     latent_train, loss = sim.run()
-    #
-    #     test_sim = Simulation(data_test, learn_alg, network, train = False)
-    #     latent_test, loss_test = test_sim.run()
-    #
-    #     data_compare, data_latent_compare = simulate_data(n_latent, n_out, exp_params.n_compare, mixing_matrix, transition_matrix, sigma_latent = sigma_latent_data, sigma_out = 0.01)
-    #     #run a test simulation for each network frozen at a point during training time
-    #     #compare the weight updates given by different learning algorithms
-    #     mean_ws = []
-    #     var_ws = []
-    #     snr_ws = []
-    #     mean_reinforce = []
-    #     var_reinforce = []
-    #     snr_reinforce = []
-    #     mean_backprop = []
-    #     var_backprop = []
-    #     snr_backprop = []
-    #     loss_mean = np.zeros((len(sim.nn_list),))
-    #     counter = 0
-    #     for nn in sim.nn_list:
-    #         #construct a list of the learning algorithms to compare
-    #
-    #         learn_alg_test = set_learn_alg(nn, learning_rate, switch_period)
-    #         test_sim = Simulation(data_test, learn_alg_test, nn, train = False, phase_switch = True)
-    #         latent_test, loss_test = test_sim.run()
-    #         loss_mean[counter] = np.mean(loss_test)
-    #
-    #         learn_alg_ws = LayeredImpression(nn, learning_rate, switch_period)
-    #         learn_alg_reinforce = LayeredAlternatingREINFORCE(nn, learning_rate, switch_period, decay = 1)
-    #
-    #         compare_algs_ws = [learn_alg_ws]
-    #         comparison_sim = Simulation(data_compare, None, nn, epoch_num = exp_params.epoch_num_snr, train = False, compare_algs = compare_algs_ws, learning_stats = True)
-    #         np.random.seed(120994)
-    #         _,_ = comparison_sim.run()
-    #         mean, var, snr = learn_alg_ws.get_learning_stats()
-    #         mean_ws.append(mean)
-    #         var_ws.append(var)
-    #         snr_ws.append(snr)
-    #
-    #         compare_algs_reinforce = [learn_alg_reinforce]
-    #         comparison_sim = Simulation(data_compare, None, nn, epoch_num = exp_params.epoch_num_snr, train = False, compare_algs = compare_algs_reinforce, learning_stats = True)
-    #         np.random.seed(120994)
-    #         _,_ = comparison_sim.run()
-    #
-    #         mean, var, snr = learn_alg_reinforce.get_learning_stats()
-    #         mean_reinforce.append(mean)
-    #         var_reinforce.append(var)
-    #         snr_reinforce.append(snr)
-    #
-    #         counter = counter + 1
-    #
+
 #%% Save
     if exp_params.save:
     #lump all of the results into one dictionary
@@ -915,26 +799,6 @@ if __name__ == '__main__':
                       'wake_sleep_sequence': wake_sleep_sequence}
             if exp_params.mode == 'standard':
                 filename = '/impression_'
-            # elif exp_params.mode == 'MNIST':
-            #     filename = '/impression_mnist_'
-            # elif exp_params.mode == 'time_constant':
-            #     filename = '/impression_tc_'
-            # elif exp_params.mode == 'switch_period':
-            #     filename = '/impression_sp_'
-            # elif exp_params.mode == 'dimensionality':
-            #     filename = '/impression_d_'
-            # elif exp_params.mode == 'Vocal_Digits':
-            #     filename = '/vocal_digits_'
-        # elif exp_params.mode == 'SNR':
-        #     result = {'mean_ws': mean_ws, 'var_ws': var_ws, 'snr_ws': snr_ws,
-        #               'mean_reinforce': mean_reinforce, 'var_reinforce': var_reinforce, 'snr_reinforce': snr_reinforce,
-        #               'mean_backprop': mean_backprop, 'var_backprop': var_backprop, 'snr_backprop': snr_backprop,
-        #               'loss_mean': loss_mean}
-        #     filename = '/impression_snr_'
-            
-        # elif exp_params.mode == 'lr_optim':
-        #     result = {'loss_mean': loss_mean}
-        #     filename = '/impression_lr_'
 
         # save the whole dictionary
         if exp_params.local:
