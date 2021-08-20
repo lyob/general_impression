@@ -8,6 +8,8 @@ import os
 import pickle
 if exp_params.local:
     import matplotlib.pyplot as plt
+
+
 class HelmHoltzCell(nn.Module):
     def __init__(self, n_latent, n_in, nonlinearity):
         """ Requirements
@@ -90,7 +92,6 @@ class HelmHoltzCell(nn.Module):
         self.latent_gen = self.latent_mean_gen + latent_noise_gen
 
         # sleep phase updates
-        #self.latent_gen = torch.normal(mean=0., std=self.sigma_latent_gen.item(), size=(self.n_latent,))
         h_gen = torch.matmul(self.W_out, self.latent_gen)
         self.s_mean_gen = self.nl.f(h_gen)
         obs_noise_gen = torch.normal(mean=0., std=self.sigma_obs_gen.item(), size=(self.n_in,))

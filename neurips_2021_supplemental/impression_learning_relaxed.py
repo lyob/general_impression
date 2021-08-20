@@ -471,9 +471,9 @@ class LayeredHM():
         """
 
         # Starts with SIL
-        if not self.prev_mu3:
+        if self.prev_mu3 is None:
             # t=1
-            if not self.prev_mu1:
+            if self.prev_mu1 is None:
                 # create mu2
                 self.l0.forward_recognition(x)
                 self.l1.forward_recognition()
@@ -510,23 +510,6 @@ class LayeredHM():
             self.prev_mu1 = self.l0.h_mean_gen
             self.prev_mu2 = self.l1.h_mean_rec
             self.prev_mu3 = self.mu3
-
-
-        # pass forward through the network for approximate inference (create mu2)
-        self.l0.forward_recognition(x)
-        self.l1.forward_recognition()
-
-        # pass backward through the network for stimulus generation (create mu1)
-        if self.prev_mu3.any():
-            h_rel = self.prev_mu3 + np.random.normal(scale=self.sigma_rec, size=(self.N,))
-            self.l1.forward_generative(h_rel)
-        else:
-            self.l1.forward_generative()
-        self.l0.forward_generative()
-
-        # create mu3
-        self.d = self.l0.d  # = self.l1.d
-        self.mu3 = (self.Lambda + self.d) * self.prev_mu1 + (1 - self.Lambda - self.d) * self.prev_mu2
 
         # based on the network phase, choose to set activities according to inference or generation (create losses)
         self.l0.forward()
