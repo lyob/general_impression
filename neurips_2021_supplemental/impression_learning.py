@@ -251,7 +251,8 @@ class InputLayer(Layer):
         self.h_pred_gen = self.W_out @ self.parent.h_rec
         self.h_pred_rec = self.h_child
         #self.layer_loss = np.sum((self.h - self.h_pred)**2)/self.sigma_gen**2
-        self.layer_loss = self.delta *(np.sum((self.h - self.h_pred_gen)**2)/self.sigma_gen**2 - np.sum((self.h - self.h_mean_rec)**2/self.sigma_rec**2)) + (1-self.delta)* (np.sum((self.h - self.h_pred_rec)**2)/self.sigma_rec**2 - np.sum((self.h - self.h_mean_gen)**2)/self.sigma_gen**2)
+        self.layer_loss = self.delta *(np.sum((self.h - self.h_pred_gen)**2)/self.sigma_gen**2 - np.sum((self.h - self.h_mean_rec)**2/self.sigma_rec**2)) + \
+                        (1-self.delta)* (np.sum((self.h - self.h_pred_rec)**2)/self.sigma_rec**2 - np.sum((self.h - self.h_mean_gen)**2)/self.sigma_gen**2)
     def reset(self):
         self.noise_gen = np.zeros((self.N,))
         self.h_mean_gen = np.zeros((self.N,))
@@ -342,7 +343,8 @@ class FeedforwardLayer(Layer):
         self.h_pred_rec = self.nl.f(self.W_in @ self.child.h_gen + self.bias)
             
         #self.layer_loss = np.sum((self.h - self.h_pred)**2)/self.sigma_gen**2
-        self.layer_loss = self.delta *(np.sum((self.h - self.h_pred_gen)**2)/(self.sigma_gen**2) - np.sum((self.h - self.h_mean_rec))/(self.sigma_rec**2)) + (1-self.delta)* (np.sum((self.h - self.h_pred_rec)**2)/(self.sigma_rec**2) - np.sum((self.h - self.h_mean_gen)**2)/(self.sigma_gen**2))
+        self.layer_loss = self.delta *(np.sum((self.h - self.h_pred_gen)**2)/(self.sigma_gen**2) - np.sum((self.h - self.h_mean_rec)**2)/(self.sigma_rec**2)) + \
+                        (1-self.delta)* (np.sum((self.h - self.h_pred_rec)**2)/(self.sigma_rec**2) - np.sum((self.h - self.h_mean_gen)**2)/(self.sigma_gen**2))
         
     def reset(self):
         self.noise_gen = np.zeros((self.N,))

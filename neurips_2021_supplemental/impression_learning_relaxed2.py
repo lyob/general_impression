@@ -239,34 +239,32 @@ class InputLayer(Layer):
     
     def forward_generative(self):
         #generate observation noise
+        self.h_mean_gen = self.W_out @ self.parent.r_prev  # here self.parent.r is from the current time step
         self.noise_gen = np.random.normal(scale = self.sigma_gen, size = (self.N,))
-        #produce observations from the latent variables and the noise
-        self.h_mean_gen = self.W_out @ self.parent.h_gen
-        self.h_gen = self.h_mean_gen + self.noise_gen
+        self.h_gen = self.h_mean_gen + self.noise_gen  # h_gen is the generated stimuli for the next time step
         
     def forward_recognition(self, h_child):
         self.h_child = h_child
-        self.noise_rec = np.random.normal(scale = self.sigma_rec, size = (self.N,))
         self.h_mean_rec = self.h_child
-        self.h_rec = self.h_mean_rec + self.noise_rec #an input layer just copies its inputs
-        
+        self.noise_rec = np.random.normal(scale = self.sigma_rec, size = (self.N,))
+        self.h_rec = self.h_mean_rec + self.noise_rec  #an input layer just copies its inputs
+ 
     def forward(self):
-        self.h_prev = self.h
-       
-        # relaxed impression learning
+        # RIL
+        self.s_prev = self.s  # save the previous hybrid s dist
         self.L_prime = self.Lambda + self.delta
+        self.s = self.L_prime * self.h_rec + (1-self.L_prime) * self.h_gen
+        self.h = self.s
+        
+        #alternative calculation of s
         # self.h_mean = self.L_prime * self.h_mean_rec + (1-self.L_prime) * self.h_mean_gen
         # self.noise_h = np.random.normal(scale=self.sigma_gen, size = (self.N,))
-        # self.h = self.h_mean + self.noise_h
-        self.h = self.L_prime * self.h_rec + (1-self.L_prime) * self.h_gen
-        
+        # self.s = self.h_mean + self.noise_h
 
-        self.h_pred_gen = self.W_out @ self.parent.h_rec
+        self.h_pred_gen = self.W_out @ self.parent.r
         self.h_pred_rec = self.h_child
 
-        #self.layer_loss = np.sum((self.h - self.h_pred)**2)/self.sigma_gen**2
-        self.layer_loss = (self.L_prime) * (np.sum((self.h - self.h_pred_gen)**2) / self.sigma_gen**2 - np.sum((self.h - self.h_mean_rec)**2) / self.sigma_rec**2) + \
-                          (1-self.L_prime) * (np.sum((self.h - self.h_pred_rec)**2) / self.sigma_rec**2 - np.sum((self.h - self.h_mean_gen)**2) / self.sigma_gen**2)
+        self.layer_loss = (np.sum((self.h - self.h_pred_gen)**2) / self.sigma_gen**2 - np.sum((self.h - self.h_mean_rec)**2) / self.sigma_rec**2) + \
 
     def reset(self):
         self.noise_gen = np.zeros((self.N,))
@@ -275,10 +273,12 @@ class InputLayer(Layer):
         self.h_child = np.zeros((self.N_child,))
         self.h_rec = np.zeros((self.N,))
         self.h = np.zeros((self.N,))
-    
+        self.s = np.zeros((self.N,))
+
     def grad_gen(self):
-        g_hat = self.parent.h_rec
-        G = (self.h_child - self.W_out @ g_hat)
+        g_hat = self.parent.h
+        # RIL 
+        G = (self.s - self.W_out @ g_hat)
         W_out_update = np.outer(G, g_hat) # / self.a**2
             
         self.generative_update_list = [W_out_update]
@@ -328,45 +328,42 @@ class FeedforwardLayer(Layer):
             self.biased = False
     
     def forward_generative(self):
-        self.h_mean_gen = self.transition_mat @ self.h
+        self.h_mean_gen = self.transition_mat @ self.r_prev
         self.noise_gen = np.random.normal(scale = self.sigma_gen, size = (self.N,))
-        self.h_gen = self.h_mean_gen + self.noise_gen
-        
+        self.h_gen = self.h_mean_gen + self.noise_gen        
+
     def forward_recognition(self):
-        self.h_pre_rec = self.W_in @ self.child.h_rec + self.bias
+        # RIL
+        self.h_pre_rec = self.W_in @ self.child.s_prev + self.bias  # here self.child.s is from the current time step
         self.h_mean_rec = self.nl.f(self.h_pre_rec)
         self.noise_rec = np.random.normal(scale = self.sigma_rec, size = (self.N,))
-        self.h_rec = self.h_mean_rec + self.noise_rec
-        
-    def forward(self):
-        self.h_prev = self.h
+        self.h_rec = self.h_mean_rec + self.noise_rec  # h_rec is the rec latent for the current time step               
 
-        # relaxed impression learning
+        # RIL
+        self.r_prev = self.r  # save the previous hybrid r dist
         self.L_prime = self.Lambda + self.delta
-        # self.h_mean = (self.L_prime * self.h_mean_rec * np.square(self.sigma_gen) + (1-self.L_prime) * self.h_mean_gen * np.square(self.sigma_rec)) / \
-        #               (self.L_prime * np.square(self.sigma_gen) + (1-self.L_prime) * np.square(self.sigma_rec))
+        self.h_mean = (self.L_prime * self.h_mean_rec * np.square(self.sigma_gen) + (1-self.L_prime) * self.h_mean_gen * np.square(self.sigma_rec)) / \
+                      (self.L_prime * np.square(self.sigma_gen) + (1-self.L_prime) * np.square(self.sigma_rec))
+        sigma_hybrid = self.sigma_gen * self.sigma_rec / np.sqrt(np.square(self.sigma_gen) * self.L_prime + np.square(self.sigma_rec) * (1-self.L_prime))
+        self.noise_h = np.random.normal(scale=sigma_hybrid, size=(self.N,))
+        self.r = self.h_mean + self.noise_h
+        self.h = self.r
         
-        # sigma_hybrid = self.sigma_gen * self.sigma_rec / np.sqrt(np.square(self.sigma_gen) * self.L_prime + np.square(self.sigma_rec) * (1-self.L_prime))
-        # self.noise_h = np.random.normal(scale=sigma_hybrid, size=(self.N,))
-        
-        self.h_mean = (self.L_prime * self.h_mean_rec * np.square(self.noise_gen) + (1-self.L_prime) * self.h_mean_gen * np.square(self.noise_rec)) / \
-                      (self.L_prime * np.square(self.noise_gen) + (1-self.L_prime) * np.square(self.noise_rec))
-        self.noise_h = self.noise_rec * self.noise_gen / (np.sqrt(self.L_prime * np.square(self.noise_rec)) + (1-self.L_prime) * np.square(self.noise_gen))
-        self.h = self.h_mean + self.noise_h        
+        #Alternative calculation of r
+        # self.h_mean = (self.L_prime * self.h_mean_rec * np.square(self.noise_gen) + (1-self.L_prime) * self.h_mean_gen * np.square(self.noise_rec)) / \
+        #               (self.L_prime * np.square(self.noise_gen) + (1-self.L_prime) * np.square(self.noise_rec))
+        # self.noise_h = self.noise_rec * self.noise_gen / (np.sqrt(self.L_prime * np.square(self.noise_rec)) + (1-self.L_prime) * np.square(self.noise_gen))
+        # self.r = self.h_mean + self.noise_h 
 
-        # the next line works but the previous section does not... 
-        # self.h = self.L_prime * self.h_rec + (1 - self.L_prime) * self.h_gen
-
+    def forward(self):
         if self.rec_switch == 1:
-            self.h_pred_gen = self.h_prev
+            self.h_pred_gen = self.r_prev
         else:
-            self.h_pred_gen = self.transition_mat @ self.h_prev
+            self.h_pred_gen = self.transition_mat @ self.r_prev
             
-        self.h_pred_rec = self.nl.f(self.W_in @ self.child.h_gen + self.bias)
+        self.h_pred_rec = self.nl.f(self.W_in @ self.child.s_prev + self.bias)
             
-        # self.layer_loss = np.sum((self.h - self.h_pred)**2)/self.sigma_gen**2
         self.layer_loss = (self.L_prime) * (np.sum((self.h - self.h_pred_gen)**2) / (self.sigma_gen**2) - np.sum((self.h - self.h_mean_rec)**2) / (self.sigma_rec**2)) + \
-                          (1-self.L_prime) * (np.sum((self.h - self.h_pred_rec)**2) / (self.sigma_rec**2) - np.sum((self.h - self.h_mean_gen)**2) / (self.sigma_gen**2))
         
     def reset(self):
         self.noise_gen = np.zeros((self.N,))
@@ -375,6 +372,7 @@ class FeedforwardLayer(Layer):
         self.h_child = np.zeros((self.N_child,))
         self.h_rec = np.zeros((self.N,))
         self.h = np.zeros((self.N,))
+        self.r = np.zeros((self.N,))
         
     def grad_gen(self):
         # update the generative transition matrix
@@ -385,8 +383,9 @@ class FeedforwardLayer(Layer):
                 self.generative_update_list = [0]
         else:
             if (self.top_layer):
-                E = (self.h - self.transition_mat @ self.h_prev)
-                transition_mat_update = np.diag(E * self.h_prev) # / self.a**2
+                # RIL
+                E = (self.r - self.transition_mat @ self.r_prev)
+                transition_mat_update = np.diag(E * self.r_prev) # / self.a**2
                 self.generative_update_list = [transition_mat_update]
         return self.generative_update_list
     
@@ -394,7 +393,7 @@ class FeedforwardLayer(Layer):
         a_hat = self.child.h
         h_pre_pred = self.W_in @ a_hat + self.bias
         h_pred = self.nl.f(h_pre_pred)
-        D = self.nl.f_prime(h_pre_pred) * (self.h - h_pred)
+        D = self.nl.f_prime(h_pre_pred) * (self.r - h_pred)
         W_in_update = np.outer(D, a_hat) # / self.a**2
         if self.biased:
             bias_update = D
